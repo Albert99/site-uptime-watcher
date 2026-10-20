@@ -347,6 +347,29 @@
     padding: 0 6px 12px 6px;
 }
 
+.suw-list-toolbar {
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.suw-sort {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    color: #5f6368;
+    margin-left: auto;
+}
+
+.suw-sort-select {
+    width: auto !important;
+    padding: 7px 34px 7px 14px !important;
+    font-size: 12.5px !important;
+    border-radius: 9999px !important;
+    min-height: 0 !important;
+}
+
 .suw-select-all-label {
     display: flex;
     align-items: center;

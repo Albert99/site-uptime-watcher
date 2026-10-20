@@ -97,6 +97,56 @@
             $bulkForm[0].submit();
         });
 
+        // Ordenación (en el navegador, sin recargar). Se recuerda la última elección.
+        var $stack = $('.suw-list-stack');
+        var $sort = $('#suw-sort');
+        var collator = (typeof Intl !== 'undefined' && Intl.Collator)
+            ? new Intl.Collator('es', { sensitivity: 'base', numeric: true })
+            : { compare: function (a, b) { return a < b ? -1 : (a > b ? 1 : 0); } };
+
+        function applySort(mode) {
+            var cards = $stack.children('.suw-row-card').get();
+
+            cards.sort(function (a, b) {
+                var hostA = a.getAttribute('data-host') || '';
+                var hostB = b.getAttribute('data-host') || '';
+
+                if (mode === 'name-asc') {
+                    return collator.compare(hostA, hostB);
+                }
+                if (mode === 'name-desc') {
+                    return collator.compare(hostB, hostA);
+                }
+                return Number(a.getAttribute('data-order')) - Number(b.getAttribute('data-order'));
+            });
+
+            $.each(cards, function (_, card) {
+                $stack.append(card);
+            });
+        }
+
+        if ($sort.length && $stack.length) {
+            var saved = 'status';
+            try {
+                saved = window.localStorage.getItem('suw_sort') || 'status';
+            } catch (err) {
+                saved = 'status';
+            }
+
+            if ($sort.find('option[value="' + saved + '"]').length && saved !== 'status') {
+                $sort.val(saved);
+                applySort(saved);
+            }
+
+            $sort.on('change', function () {
+                var mode = $(this).val();
+                applySort(mode);
+                try {
+                    window.localStorage.setItem('suw_sort', mode);
+                } catch (err) { /* sin almacenamiento: no pasa nada */ }
+            });
+        }
+
         // Animación comprobar ahora
         var $manualForm = $('#suw-manual-check-form');
         var $btnCheck = $('#suw-btn-check');

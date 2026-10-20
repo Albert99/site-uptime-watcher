@@ -993,6 +993,14 @@ class Site_Uptime_Watcher {
                                 <input type="checkbox" id="suw-select-all" class="suw-check">
                                 <span>Seleccionar todo</span>
                             </label>
+                            <label class="suw-sort">
+                                <span>Ordenar</span>
+                                <select id="suw-sort" class="suw-control suw-select suw-sort-select">
+                                    <option value="status">Estado (caídas primero)</option>
+                                    <option value="name-asc">Nombre A → Z</option>
+                                    <option value="name-desc">Nombre Z → A</option>
+                                </select>
+                            </label>
                             <button type="submit" id="suw-btn-delete-selected" class="suw-btn suw-btn-danger" disabled>
                                 <svg class="suw-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
                                 <span>Eliminar seleccionadas</span>
@@ -1005,7 +1013,7 @@ class Site_Uptime_Watcher {
                                     <p>No hay webs agregadas en la lista.</p>
                                 </div>
                             <?php else: ?>
-                                <?php foreach ($rows as $row):
+                                <?php foreach ($rows as $row_index => $row):
                                     $url      = $row['url'];
                                     $host     = $row['host'];
                                     $status   = $row['status'];
@@ -1016,7 +1024,7 @@ class Site_Uptime_Watcher {
                                     $initial  = function_exists('mb_substr') ? mb_strtoupper(mb_substr($host, 0, 1)) : strtoupper(substr($host, 0, 1));
                                     $code_cls = $status === 'up' ? 'is-good' : ($status === 'down' ? 'is-bad' : 'is-wait');
                                 ?>
-                                    <div class="suw-row-card is-<?php echo esc_attr($status); ?>" data-status="<?php echo esc_attr($status); ?>">
+                                    <div class="suw-row-card is-<?php echo esc_attr($status); ?>" data-status="<?php echo esc_attr($status); ?>" data-host="<?php echo esc_attr(strtolower($host)); ?>" data-order="<?php echo (int) $row_index; ?>">
                                         <div class="suw-row-select">
                                             <input type="checkbox" name="selected_urls[]" value="<?php echo esc_attr($url); ?>" class="suw-check suw-site-checkbox">
                                         </div>

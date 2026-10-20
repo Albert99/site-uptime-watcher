@@ -68,6 +68,9 @@ site-uptime-watcher/
 
 ## Changelog
 
+### 1.9.0
+- Selector *Ordenar* en la lista: por estado (caídas primero), nombre A → Z o nombre Z → A. Se aplica al instante y recuerda la última elección.
+
 ### 1.8.1
 - No se añaden webs que ya están en la lista. La comparación ignora `http`/`https`, `www.`, mayúsculas y la barra final, y el aviso indica cuántas se omitieron.
 
