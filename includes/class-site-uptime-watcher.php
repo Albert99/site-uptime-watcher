@@ -188,28 +188,63 @@ class Site_Uptime_Watcher {
     private function add_sites(array $raw_urls) {
         $list   = $this->get_sites_list();
         $states = $this->get_states();
+        $known  = [];
         $added  = [];
+        $dupes  = 0;
+        $bad    = 0;
+
+        foreach ($list as $existing) {
+            $known[$this->url_key($existing)] = true;
+        }
 
         foreach ($raw_urls as $raw) {
             $clean = $this->sanitize_target_url($raw);
-            if ($clean && !in_array($clean, $list, true)) {
-                $list[]          = $clean;
-                $states[$clean]  = $this->new_state();
-                $added[]         = $clean;
+
+            if (!$clean) {
+                $bad++;
+                continue;
             }
+
+            $key = $this->url_key($clean);
+            if (isset($known[$key])) {
+                $dupes++;
+                continue;
+            }
+
+            $known[$key]    = true;
+            $list[]         = $clean;
+            $states[$clean] = $this->new_state();
+            $added[]        = $clean;
         }
 
-        if (!$added) {
-            return 0;
+        if ($added) {
+            $this->save_sites_list($list);
+            $this->save_states($states);
+
+            // El resto de la cola la procesa el cron.
+            $this->run_checks(array_slice($added, 0, self::INLINE_MAX));
         }
 
-        $this->save_sites_list($list);
-        $this->save_states($states);
+        return ['added' => count($added), 'duplicates' => $dupes, 'invalid' => $bad];
+    }
 
-        // El resto de la cola la procesa el cron.
-        $this->run_checks(array_slice($added, 0, self::INLINE_MAX));
+    /**
+     * Clave de comparación: ignora http/https, "www.", mayúsculas en el dominio,
+     * puertos por defecto y la barra final, para que ejemplo.com y
+     * https://www.ejemplo.com/ cuenten como la misma web.
+     */
+    private function url_key($url) {
+        $parts = wp_parse_url($url);
+        if (empty($parts['host'])) {
+            return strtolower(trim((string) $url));
+        }
 
-        return count($added);
+        $host  = preg_replace('#^www\.#i', '', strtolower($parts['host']));
+        $port  = (isset($parts['port']) && !in_array((int) $parts['port'], [80, 443], true)) ? ':' . $parts['port'] : '';
+        $path  = isset($parts['path']) ? rtrim($parts['path'], '/') : '';
+        $query = isset($parts['query']) ? '?' . $parts['query'] : '';
+
+        return $host . $port . $path . $query;
     }
 
     private function remove_sites(array $urls_to_remove) {
@@ -250,24 +285,40 @@ class Site_Uptime_Watcher {
 
     public function handle_add_site() {
         $this->guard('suw_add_site');
-        $raw = isset($_POST['suw_new_url']) ? wp_unslash($_POST['suw_new_url']) : '';
+        $raw    = isset($_POST['suw_new_url']) ? wp_unslash($_POST['suw_new_url']) : '';
+        $result = $this->add_sites([$raw]);
 
-        if ($this->add_sites([$raw]) > 0) {
+        if ($result['added'] > 0) {
             $this->flash('Web agregada y comprobada.');
         }
-        $this->flash('URL no válida o ya monitorizada.', 'error');
+        if ($result['duplicates'] > 0) {
+            $this->flash('Esa web ya está en la lista, no se ha añadido de nuevo.', 'error');
+        }
+        $this->flash('La URL no es válida.', 'error');
     }
 
     public function handle_bulk_add() {
         $this->guard('suw_bulk_add');
-        $raw   = isset($_POST['suw_bulk_urls']) ? wp_unslash($_POST['suw_bulk_urls']) : '';
-        $lines = preg_split('/[\s,;]+/', (string) $raw, -1, PREG_SPLIT_NO_EMPTY);
-        $count = $this->add_sites($lines ?: []);
+        $raw    = isset($_POST['suw_bulk_urls']) ? wp_unslash($_POST['suw_bulk_urls']) : '';
+        $lines  = preg_split('/[\s,;]+/', (string) $raw, -1, PREG_SPLIT_NO_EMPTY);
+        $result = $this->add_sites($lines ?: []);
 
-        if ($count > 0) {
-            $this->flash(sprintf('Se han importado %d webs correctamente.', $count));
+        $parts = [];
+        if ($result['added'] > 0) {
+            $parts[] = sprintf('Se han añadido %d web(s).', $result['added']);
         }
-        $this->flash('No se añadieron nuevas URLs (comprueba si ya existían o su formato).', 'error');
+        if ($result['duplicates'] > 0) {
+            $parts[] = sprintf('%d ya estaban en la lista y se han omitido.', $result['duplicates']);
+        }
+        if ($result['invalid'] > 0) {
+            $parts[] = sprintf('%d no eran URLs válidas.', $result['invalid']);
+        }
+
+        if (!$parts) {
+            $parts[] = 'No se ha indicado ninguna URL.';
+        }
+
+        $this->flash(implode(' ', $parts), $result['added'] > 0 ? 'success' : 'error');
     }
 
     public function handle_manual_check() {

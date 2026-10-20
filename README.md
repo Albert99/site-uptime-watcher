@@ -68,6 +68,9 @@ site-uptime-watcher/
 
 ## Changelog
 
+### 1.8.1
+- No se añaden webs que ya están en la lista. La comparación ignora `http`/`https`, `www.`, mayúsculas y la barra final, y el aviso indica cuántas se omitieron.
+
 ### 1.8.0
 - Correos de caída y recuperación en HTML (compatibles con Gmail, Outlook y móvil) con versión de texto alternativa.
 - El correo de recuperación indica cuánto tiempo estuvo caída la web.
