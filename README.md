@@ -68,6 +68,9 @@ site-uptime-watcher/
 
 ## Changelog
 
+### 1.9.2
+- Quitado el texto "Comprobación en curso…" del panel lateral (era estático y no aportaba información).
+
 ### 1.9.1
 - Corrige falsos positivos en webs operativas:
   - Certificado con cadena incompleta (error SSL 60): si la web responde sin verificar, se marca como operativa con la nota "SSL incompleto". Los certificados caducados o de otro dominio siguen contando como caída.

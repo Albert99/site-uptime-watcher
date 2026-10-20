@@ -969,7 +969,6 @@ class Site_Uptime_Watcher {
         }
 
         $next_run = wp_next_scheduled(self::HOOK);
-        $running  = (bool) get_transient(self::LOCK_KEY);
         ?>
         <div class="suw-container">
 
@@ -1221,9 +1220,7 @@ class Site_Uptime_Watcher {
                         </a>
 
                         <p class="suw-cron-status">
-                            <?php if ($running): ?>
-                                Comprobación en curso…
-                            <?php elseif ($next_run): ?>
+                            <?php if ($next_run): ?>
                                 Próxima comprobación: <strong><?php echo esc_html(wp_date('H:i:s', $next_run)); ?></strong>
                             <?php else: ?>
                                 <strong class="suw-cron-warn">WP-Cron no está programado.</strong> Recarga la página o reactiva el plugin.
