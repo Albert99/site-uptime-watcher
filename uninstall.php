@@ -4,6 +4,7 @@ if (!defined('WP_UNINSTALL_PLUGIN')) {
 }
 
 wp_clear_scheduled_hook('suw_check_sites_event');
+wp_clear_scheduled_hook('suw_check_queue_event');
 
 delete_option('suw_options');
 delete_option('suw_sites_state');

@@ -68,6 +68,13 @@ site-uptime-watcher/
 
 ## Changelog
 
+### 1.9.1
+- Corrige falsos positivos en webs operativas:
+  - Certificado con cadena incompleta (error SSL 60): si la web responde sin verificar, se marca como operativa con la nota "SSL incompleto". Los certificados caducados o de otro dominio siguen contando como caída.
+  - Tiempos de espera más generosos (20 s en total, 10 s para conectar) para hostings lentos.
+- Errores de red con etiqueta legible (Timeout, Error SSL, DNS no resuelve...) y el detalle completo al pasar el ratón.
+- Las webs en cola se comprueban en cuanto es posible: la importación tiene presupuesto de tiempo, lo pendiente se programa a los segundos y cada ciclo empieza por las más antiguas.
+
 ### 1.9.0
 - Selector *Ordenar* en la lista: por estado (caídas primero), nombre A → Z o nombre Z → A. Se aplica al instante y recuerda la última elección.
 

@@ -12,6 +12,9 @@ class Site_Uptime_Watcher {
     const INLINE_MAX  = 60;      // máximo de webs comprobadas en línea al importar
     const MAX_BODY    = 262144;  // 256 KB de body son suficientes para las firmas
     const ERROR_PAGE_MAX = 30000; // las páginas de error de WP son pequeñas
+    const TIMEOUT         = 20;    // segundos totales por petición (hostings lentos)
+    const CONNECT_TIMEOUT = 10;    // segundos para conectar
+    const QUEUE_HOOK      = 'suw_check_queue_event';
 
     private $opt_key   = 'suw_options';
     private $state_key = 'suw_sites_state';
@@ -23,6 +26,7 @@ class Site_Uptime_Watcher {
         add_filter('cron_schedules', [__CLASS__, 'register_interval']);
         add_action('init', [__CLASS__, 'ensure_cron']);
         add_action(self::HOOK, [$this, 'check_all_sites']);
+        add_action(self::QUEUE_HOOK, [$this, 'check_all_sites']);
 
         foreach (['add_site', 'bulk_add', 'manual_check', 'delete_sites', 'save_settings', 'check_update', 'test_email'] as $action) {
             add_action('admin_post_suw_' . $action, [$this, 'handle_' . $action]);
@@ -57,6 +61,7 @@ class Site_Uptime_Watcher {
 
     public static function deactivate_cron() {
         wp_clear_scheduled_hook(self::HOOK);
+        wp_clear_scheduled_hook(self::QUEUE_HOOK);
         delete_transient(self::LOCK_KEY);
     }
 
@@ -221,8 +226,20 @@ class Site_Uptime_Watcher {
             $this->save_sites_list($list);
             $this->save_states($states);
 
-            // El resto de la cola la procesa el cron.
-            $this->run_checks(array_slice($added, 0, self::INLINE_MAX));
+            if (function_exists('set_time_limit')) {
+                @set_time_limit(120);
+            }
+
+            // Comprobación en línea con presupuesto de tiempo; lo que no dé tiempo queda en cola.
+            $this->run_checks(array_slice($added, 0, self::INLINE_MAX), time() + 60);
+
+            $after = $this->get_states();
+            foreach ($added as $url) {
+                if (empty($after[$url]['last_check'])) {
+                    wp_schedule_single_event(time() + 5, self::QUEUE_HOOK);
+                    break;
+                }
+            }
         }
 
         return ['added' => count($added), 'duplicates' => $dupes, 'invalid' => $bad];
@@ -425,7 +442,12 @@ class Site_Uptime_Watcher {
             }
             $this->save_states($states);
 
-            $this->run_checks($urls);
+            // Las nunca comprobadas y las más antiguas primero: nada se queda sin turno.
+            usort($urls, function ($a, $b) use ($states) {
+                return strcmp((string) ($states[$a]['last_check'] ?? ''), (string) ($states[$b]['last_check'] ?? ''));
+            });
+
+            $this->run_checks($urls, time() + self::LOCK_TTL - 30);
         } finally {
             delete_transient(self::LOCK_KEY);
         }
@@ -437,7 +459,7 @@ class Site_Uptime_Watcher {
      * Comprueba las URLs por lotes en paralelo. Tras cada lote relee lista y
      * estados para no resucitar webs borradas mientras corría el ciclo.
      */
-    private function run_checks(array $urls) {
+    private function run_checks(array $urls, $deadline = 0) {
         if (!$urls) {
             return;
         }
@@ -448,6 +470,10 @@ class Site_Uptime_Watcher {
         $ignored = $this->parse_ignored_codes($opts['ignored_codes']);
 
         foreach (array_chunk($urls, self::BATCH_SIZE) as $chunk) {
+            if ($deadline && time() > $deadline) {
+                break; // el resto se comprueba en el siguiente ciclo
+            }
+
             $prior = $this->get_states();
 
             // Reintento inmediato solo en el primer fallo: filtra microcortes
@@ -481,6 +507,7 @@ class Site_Uptime_Watcher {
     private function apply_result($url, array $state, array $eval, $max, $recipient) {
         $state['last_code']  = $eval['code'];
         $state['last_check'] = current_time('mysql');
+        $state['last_detail'] = isset($eval['detail']) ? $eval['detail'] : '';
 
         if ($eval['is_down']) {
             $state['consecutive_failures'] = (int) ($state['consecutive_failures'] ?? 0) + 1;
@@ -495,7 +522,7 @@ class Site_Uptime_Watcher {
                 $state['status'] = 'DOWN';
                 if (empty($state['alert_sent'])) {
                     // Si el correo falla, no se marca como enviado y se reintenta en el siguiente ciclo.
-                    $state['alert_sent'] = $this->send_down_email($url, $eval['code'], $recipient, (int) $state['consecutive_failures'], (int) $max, (int) $state['first_failure_ts']);
+                    $state['alert_sent'] = $this->send_down_email($url, $eval['code'], $recipient, (int) $state['consecutive_failures'], (int) $max, (int) $state['first_failure_ts'], isset($eval['detail']) ? $eval['detail'] : '');
                 }
             } elseif (($state['status'] ?? '') !== 'DOWN') {
                 $state['status'] = 'PENDING';
@@ -523,11 +550,34 @@ class Site_Uptime_Watcher {
     private function probe(array $urls, array $retryable, $verify, array $ignored = []) {
         $responses = $this->fetch_many($urls, $verify);
         $evals     = [];
-        $failed    = [];
+        $lenient   = [];
 
         foreach ($urls as $url) {
             $evals[$url] = $this->inspect_site_response($responses[$url], $ignored);
-            if ($evals[$url]['is_down'] && in_array($url, $retryable, true)) {
+
+            if ($verify && $evals[$url]['is_down'] && $this->is_incomplete_chain($responses[$url]['error'])) {
+                $lenient[] = $url;
+            }
+        }
+
+        // Cadena de certificados incompleta: los navegadores la toleran (descargan el
+        // intermedio) pero cURL no. Si la web responde sin verificar, está operativa.
+        if ($lenient) {
+            $second = $this->fetch_many($lenient, false);
+            foreach ($lenient as $url) {
+                $eval = $this->inspect_site_response($second[$url], $ignored);
+                if (!$eval['is_down']) {
+                    $eval['code']  .= ' · SSL incompleto';
+                    $eval['detail'] = 'El servidor no envía la cadena completa de certificados. Los navegadores lo toleran, pero conviene corregirlo.';
+                }
+                $evals[$url] = $eval;
+            }
+        }
+
+        // Reintento inmediato solo en el primer fallo.
+        $failed = [];
+        foreach ($urls as $url) {
+            if ($evals[$url]['is_down'] && in_array($url, $retryable, true) && !in_array($url, $lenient, true)) {
                 $failed[] = $url;
             }
         }
@@ -541,6 +591,48 @@ class Site_Uptime_Watcher {
         }
 
         return $evals;
+    }
+
+    private function is_incomplete_chain($error) {
+        if (!is_string($error) || $error === '') {
+            return false;
+        }
+
+        foreach (['unable to get local issuer certificate', 'unable to get issuer certificate', 'unable to verify the first certificate'] as $needle) {
+            if (stripos($error, $needle) !== false) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /** Traduce los errores de cURL a una etiqueta corta y legible. */
+    private function friendly_error($message) {
+        $message = trim((string) $message);
+
+        if (preg_match('/^(?:cURL error )?(\d+)\b/i', $message, $m)) {
+            $map = [
+                6  => 'DNS no resuelve',
+                7  => 'Conexión rechazada',
+                28 => 'Timeout',
+                35 => 'Error SSL',
+                51 => 'Error SSL',
+                52 => 'Respuesta vacía',
+                56 => 'Conexión interrumpida',
+                58 => 'Error SSL',
+                60 => 'Error SSL',
+                77 => 'Error SSL',
+            ];
+            $n = (int) $m[1];
+            return isset($map[$n]) ? $map[$n] : 'Error de red (' . $n . ')';
+        }
+
+        if (stripos($message, 'timed out') !== false || stripos($message, 'time-out') !== false) {
+            return 'Timeout';
+        }
+
+        return function_exists('mb_substr') ? mb_substr($message, 0, 40) : substr($message, 0, 40);
     }
 
     /**
@@ -565,8 +657,8 @@ class Site_Uptime_Watcher {
                     'type'    => 'GET',
                     'headers' => ['User-Agent' => $user_agent],
                     'options' => [
-                        'timeout'          => 10,
-                        'connect_timeout'  => 6,
+                        'timeout'          => self::TIMEOUT,
+                        'connect_timeout'  => self::CONNECT_TIMEOUT,
                         'follow_redirects' => true,
                         'redirects'        => 5,
                         'verify'           => $verify ? (file_exists($ca_bundle) ? $ca_bundle : true) : false,
@@ -605,7 +697,7 @@ class Site_Uptime_Watcher {
         // Fallback secuencial.
         foreach ($urls as $url) {
             $response = wp_remote_get($url, [
-                'timeout'             => 10,
+                'timeout'             => self::TIMEOUT,
                 'redirection'         => 5,
                 'sslverify'           => (bool) $verify,
                 'user-agent'          => $user_agent,
@@ -628,8 +720,8 @@ class Site_Uptime_Watcher {
 
     private function inspect_site_response(array $r, array $ignored = []) {
         if ($r['error'] !== null) {
-            $msg = function_exists('mb_substr') ? mb_substr($r['error'], 0, 70) : substr($r['error'], 0, 70);
-            return ['is_down' => true, 'code' => $msg];
+            $detail = function_exists('mb_substr') ? mb_substr($r['error'], 0, 160) : substr($r['error'], 0, 160);
+            return ['is_down' => true, 'code' => $this->friendly_error($r['error']), 'detail' => $detail];
         }
 
         $http_code = (int) $r['code'];
@@ -693,9 +785,13 @@ class Site_Uptime_Watcher {
         return (bool) $sent;
     }
 
-    private function send_down_email($url, $code, $recipient, $failures = 0, $max = 0, $first_ts = 0) {
+    private function send_down_email($url, $code, $recipient, $failures = 0, $max = 0, $first_ts = 0, $detail = '') {
         $host = $this->host_of($url);
         $rows = ['Diagnóstico' => $code, 'Detectada' => current_time('mysql')];
+
+        if ($detail !== '') {
+            $rows['Detalle'] = $detail;
+        }
 
         if ($first_ts > 0) {
             $rows['Primer fallo'] = wp_date('Y-m-d H:i:s', $first_ts);
@@ -1056,7 +1152,7 @@ class Site_Uptime_Watcher {
                                         </div>
 
                                         <div class="suw-row-code">
-                                            <span class="suw-code-tag <?php echo esc_attr($code_cls); ?>"><?php echo esc_html($code); ?></span>
+                                            <span class="suw-code-tag <?php echo esc_attr($code_cls); ?>" title="<?php echo esc_attr(trim($code . ' ' . (isset($data['last_detail']) ? $data['last_detail'] : ''))); ?>"><?php echo esc_html($code); ?></span>
                                         </div>
 
                                         <div class="suw-row-meta">
