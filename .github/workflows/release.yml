@@ -1,0 +1,42 @@
+name: Release
+
+# Al subir una etiqueta vX.Y.Z se valida el plugin, se empaqueta el ZIP y se
+# publica la Release. El actualizador del plugin solo ofrece Releases.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: La etiqueta debe coincidir con la versión del plugin
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          HDR=$(grep -m1 -oP '^\s*\*\s*Version:\s*\K[0-9.]+' site-uptime-watcher.php)
+          CONST=$(grep -m1 -oP "SUW_VERSION', '\K[0-9.]+" site-uptime-watcher.php)
+          echo "tag=$TAG cabecera=$HDR constante=$CONST"
+          [ "$TAG" = "$HDR" ] && [ "$TAG" = "$CONST" ] || { echo "::error::La versión no coincide"; exit 1; }
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '7.4'
+
+      - name: Comprobar sintaxis PHP
+        run: find . -name '*.php' -not -path './.git/*' -print0 | xargs -0 -n1 php -l
+
+      - name: Empaquetar ZIP
+        run: |
+          mkdir -p /tmp/pkg/site-uptime-watcher
+          rsync -a --exclude='.git' --exclude='.github' --exclude='.gitignore' ./ /tmp/pkg/site-uptime-watcher/
+          (cd /tmp/pkg && zip -qr "$GITHUB_WORKSPACE/site-uptime-watcher.zip" site-uptime-watcher)
+
+      - name: Publicar Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" site-uptime-watcher.zip --title "$GITHUB_REF_NAME" --generate-notes
