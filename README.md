@@ -35,10 +35,11 @@ El plugin se actualiza solo desde este repositorio de GitHub, con el sistema nat
 Solo se ofrecen las Releases publicadas en GitHub (ver *Publicar una versión*). La consulta se cachea 1 hora y el botón *Buscar actualizaciones* la fuerza. Funciona con repositorio público.
 
 ## Publicar una versión
-El actualizador solo ofrece **Releases**; un commit en `main` no llega a las instalaciones.
+El actualizador solo ofrece **Releases**; un commit en `main` sin cambio de versión no llega a las instalaciones.
 1. Sube `Version:` en `site-uptime-watcher.php` y `SUW_VERSION` (deben coincidir) y haz commit a `main`.
-2. Crea y sube la etiqueta: `git tag vX.Y.Z && git push origin vX.Y.Z`.
-3. La GitHub Action `.github/workflows/release.yml` valida la versión y la sintaxis, empaqueta `site-uptime-watcher.zip` y publica la Release.
+2. La GitHub Action `.github/workflows/release.yml` detecta que esa versión no tiene Release, valida la versión y la sintaxis, empaqueta `site-uptime-watcher.zip` y publica la Release `vX.Y.Z`.
+
+También se puede publicar subiendo a mano una etiqueta `vX.Y.Z` (debe coincidir con la versión del plugin) o ejecutando el workflow desde la pestaña *Actions*.
 
 ## Recomendación de producción
 WP-Cron solo se dispara con visitas. Para comprobaciones exactas cada 5 minutos, desactívalo y usa un cron del servidor:
