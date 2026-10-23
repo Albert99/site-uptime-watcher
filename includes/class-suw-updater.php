@@ -6,9 +6,9 @@ if (!defined('ABSPATH')) {
 /**
  * Actualizador desde GitHub (repositorio público).
  *
- * Orden de consulta:
- *  1. Última Release (tag vX.Y.Z; si tiene un .zip adjunto se usa ese, si no el zipball).
- *  2. Si no hay Releases: cabecera "Version:" de site-uptime-watcher.php en la rama por defecto.
+ * Solo se ofrecen Releases publicadas (tag vX.Y.Z). Si la Release tiene un .zip
+ * adjunto llamado site-uptime-watcher*.zip se usa ese; si no, el zipball del tag.
+ * Un commit en `main` NUNCA llega a las instalaciones hasta que se publica una Release.
  *
  * Integra la actualización en el sistema nativo de WordPress (Escritorio > Actualizaciones,
  * lista de Plugins, actualizaciones automáticas) y añade accesos visibles.
@@ -17,8 +17,9 @@ class Site_Uptime_Updater {
 
     const REPO      = 'Albert99/site-uptime-watcher';
     const CACHE_KEY = 'suw_remote_release';
-    const CACHE_TTL = 21600; // 6 h
-    const ERROR_TTL = 1800;  // 30 min si GitHub no responde
+    const LAST_KEY  = 'suw_last_release'; // última Release vista (sirve si GitHub falla puntualmente)
+    const CACHE_TTL = 3600;  // 1 h
+    const ERROR_TTL = 900;   // 15 min si GitHub no responde
 
     public static function init() {
         add_filter('pre_set_site_transient_update_plugins', [__CLASS__, 'inject_update']);
@@ -61,8 +62,13 @@ class Site_Uptime_Updater {
         }
 
         $info = self::fetch_release();
-        if (!$info) {
-            $info = self::fetch_branch_header();
+
+        if ($info) {
+            update_option(self::LAST_KEY, $info, false);
+        } else {
+            // GitHub no responde (o aún no hay Releases): se usa la última conocida, nunca `main`.
+            $last = get_option(self::LAST_KEY);
+            $info = (is_array($last) && !empty($last['version'])) ? $last : null;
         }
 
         set_site_transient(self::CACHE_KEY, $info ?: ['version' => ''], $info ? self::CACHE_TTL : self::ERROR_TTL);
@@ -121,21 +127,6 @@ class Site_Uptime_Updater {
             'url'     => !empty($data['html_url']) ? $data['html_url'] : self::repo_url(),
             'notes'   => (string) ($data['body'] ?? ''),
             'source'  => 'release',
-        ];
-    }
-
-    private static function fetch_branch_header() {
-        $body = self::request('https://raw.githubusercontent.com/' . self::REPO . '/HEAD/site-uptime-watcher.php');
-        if (!$body || !preg_match('/^[ \t\/*#@]*Version:\s*([0-9][0-9.]*)/mi', $body, $m)) {
-            return null;
-        }
-
-        return [
-            'version' => $m[1],
-            'package' => self::repo_url() . '/archive/HEAD.zip',
-            'url'     => self::repo_url(),
-            'notes'   => '',
-            'source'  => 'branch',
         ];
     }
 

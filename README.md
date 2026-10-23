@@ -32,12 +32,13 @@ El plugin se actualiza solo desde este repositorio de GitHub, con el sistema nat
 - En la propia pantalla de **Uptime Watcher** hay un botón *Buscar actualizaciones* y, si hay versión nueva, un banner con *Actualizar ahora*.
 - En la lista de Plugins hay un enlace *Buscar actualizaciones* y, si procede, *Actualizar ahora*.
 
-Para publicar una versión nueva:
-1. Sube `Version:` en `site-uptime-watcher.php` y `SUW_VERSION`, y súbelo a `main`.
-2. Recomendado: crea una Release en GitHub con tag `vX.Y.Z` (y, opcionalmente, adjunta `site-uptime-watcher.zip`).
-   Sin Release, el plugin compara la versión de la cabecera en `main`.
+Solo se ofrecen las Releases publicadas en GitHub (ver *Publicar una versión*). La consulta se cachea 1 hora y el botón *Buscar actualizaciones* la fuerza. Funciona con repositorio público.
 
-La consulta se cachea 6 horas. Funciona con repositorio público.
+## Publicar una versión
+El actualizador solo ofrece **Releases**; un commit en `main` no llega a las instalaciones.
+1. Sube `Version:` en `site-uptime-watcher.php` y `SUW_VERSION` (deben coincidir) y haz commit a `main`.
+2. Crea y sube la etiqueta: `git tag vX.Y.Z && git push origin vX.Y.Z`.
+3. La GitHub Action `.github/workflows/release.yml` valida la versión y la sintaxis, empaqueta `site-uptime-watcher.zip` y publica la Release.
 
 ## Recomendación de producción
 WP-Cron solo se dispara con visitas. Para comprobaciones exactas cada 5 minutos, desactívalo y usa un cron del servidor:
@@ -61,6 +62,7 @@ site-uptime-watcher/
 ├── includes/class-site-uptime-watcher.php
 ├── includes/class-suw-updater.php
 ├── includes/class-suw-php-info.php
+├── .github/workflows/release.yml
 └── assets/
     ├── css/admin.css
     ├── js/admin.js
@@ -68,6 +70,13 @@ site-uptime-watcher/
 ```
 
 ## Changelog
+
+### 1.11.0
+- **Actualizador solo con Releases:** un commit en `main` ya no se instala en producción hasta que se publica una Release. Si GitHub falla puntualmente se usa la última Release conocida. Caché de 1 hora. Nueva GitHub Action que publica la Release al subir una etiqueta `vX.Y.Z`.
+- **Protección contra caída masiva:** si fallan a la vez ≥5 webs y ≥50 % de la lista, el plugin comprueba si el propio servidor tiene salida a internet. Si no la tiene, descarta el ciclo sin cambiar estados ni enviar alertas, y lo indica en el panel.
+- **Correo resumen:** si en un mismo ciclo hay 3 o más avisos (caídas o recuperaciones), se envía un único correo con la lista.
+- **Estado del monitor:** el panel muestra "Última comprobación hace X" y avisa en rojo si pasan más de 15 minutos. Nuevo ajuste opcional *URL de heartbeat* (healthchecks.io, UptimeRobot…) que se llama tras cada ciclo.
+- **Lock atómico** (`INSERT IGNORE` + relevo con compare-and-swap, como `WP_Upgrader`) que también protege las comprobaciones al añadir webs, y margen de deadline calculado con el peor caso de un lote.
 
 ### 1.10.1
 - Las columnas PHP / Recomendada / Riesgo solo se muestran si al menos una web publica su versión de PHP; si ninguna lo hace, el panel queda limpio y reaparecen solas cuando haya datos.

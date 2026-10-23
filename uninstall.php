@@ -9,6 +9,9 @@ wp_clear_scheduled_hook('suw_check_queue_event');
 delete_option('suw_options');
 delete_option('suw_sites_state');
 delete_option('suw_incidents');
+delete_option('suw_lock');
+delete_option('suw_health');
+delete_option('suw_last_release');
 delete_transient('suw_check_lock');
 delete_site_transient('suw_remote_release');
 

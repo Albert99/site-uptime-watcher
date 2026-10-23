@@ -6,7 +6,13 @@ if (!defined('ABSPATH')) {
 class Site_Uptime_Watcher {
 
     const HOOK        = 'suw_check_sites_event';
-    const LOCK_KEY    = 'suw_check_lock';
+    const LOCK_OPT    = 'suw_lock';      // lock atómico en la tabla de opciones
+    const HEALTH_OPT  = 'suw_health';    // estado del último ciclo
+    const BATCH_WORST = 65;      // peor caso de un lote: petición + reintento SSL + reintento
+    const MASS_MIN    = 5;       // mínimo de webs caídas para sospechar de la propia red
+    const MASS_RATIO  = 0.5;     // proporción de webs caídas que dispara la comprobación de red
+    const DIGEST_MIN  = 3;       // desde N avisos en un ciclo se envía un único correo resumen
+    const STALE_AFTER = 900;     // s sin ciclos para avisar de que el monitor está parado
     const LOCK_TTL    = 270;     // < 300 s: el lock caduca antes del siguiente ciclo
     const BATCH_SIZE  = 20;      // peticiones simultáneas por lote
     const INLINE_MAX  = 60;      // máximo de webs comprobadas en línea al importar
@@ -62,7 +68,7 @@ class Site_Uptime_Watcher {
     public static function deactivate_cron() {
         wp_clear_scheduled_hook(self::HOOK);
         wp_clear_scheduled_hook(self::QUEUE_HOOK);
-        delete_transient(self::LOCK_KEY);
+        delete_option(self::LOCK_OPT);
     }
 
     /* ------------------------------------------------------------------
@@ -107,6 +113,7 @@ class Site_Uptime_Watcher {
             'max_failures' => 2,
             'verify_ssl'   => 1,
             'ignored_codes' => '',
+            'heartbeat_url' => '',
         ]);
     }
 
@@ -230,8 +237,15 @@ class Site_Uptime_Watcher {
                 @set_time_limit(120);
             }
 
-            // Comprobación en línea con presupuesto de tiempo; lo que no dé tiempo queda en cola.
-            $this->run_checks(array_slice($added, 0, self::INLINE_MAX), time() + 60);
+            // Comprobación en línea con presupuesto de tiempo y lock; si el cron está
+            // ejecutándose o no da tiempo, lo pendiente queda en cola.
+            if ($this->acquire_lock()) {
+                try {
+                    $this->run_checks(array_slice($added, 0, self::INLINE_MAX), time() + 60);
+                } finally {
+                    $this->release_lock();
+                }
+            }
 
             $after = $this->get_states();
             foreach ($added as $url) {
@@ -362,7 +376,7 @@ class Site_Uptime_Watcher {
         $remote = Site_Uptime_Updater::force_check();
 
         if (!$remote) {
-            $this->flash('No se pudo consultar GitHub. Inténtalo de nuevo en unos minutos.', 'error');
+            $this->flash('No se pudo consultar GitHub o todavía no hay ninguna Release publicada. Inténtalo de nuevo en unos minutos.', 'error');
         }
         if (version_compare($remote['version'], SUW_VERSION, '>')) {
             $this->flash(sprintf('Hay una nueva versión disponible: %s (tienes la %s).', $remote['version'], SUW_VERSION));
@@ -405,6 +419,15 @@ class Site_Uptime_Watcher {
         $ignored               = isset($_POST['ignored_codes']) ? wp_unslash($_POST['ignored_codes']) : '';
         $opts['ignored_codes'] = implode(', ', $this->parse_ignored_codes($ignored));
 
+        $heartbeat = isset($_POST['heartbeat_url']) ? trim((string) wp_unslash($_POST['heartbeat_url'])) : '';
+        if ($heartbeat !== '') {
+            $heartbeat = esc_url_raw($heartbeat, ['http', 'https']);
+            if ($heartbeat === '' || !wp_http_validate_url($heartbeat)) {
+                $this->flash('La URL de heartbeat no es válida.', 'error');
+            }
+        }
+        $opts['heartbeat_url'] = $heartbeat;
+
         update_option($this->opt_key, $opts);
 
         $this->flash('Preferencias guardadas.');
@@ -418,10 +441,11 @@ class Site_Uptime_Watcher {
      * Ciclo completo (cron y botón manual). Devuelve false si ya hay otro en curso.
      */
     public function check_all_sites() {
-        if (get_transient(self::LOCK_KEY)) {
+        if (!$this->acquire_lock()) {
             return false;
         }
-        set_transient(self::LOCK_KEY, time(), self::LOCK_TTL);
+
+        $started = time();
 
         if (function_exists('set_time_limit')) {
             @set_time_limit(self::LOCK_TTL);
@@ -447,34 +471,97 @@ class Site_Uptime_Watcher {
                 return strcmp((string) ($states[$a]['last_check'] ?? ''), (string) ($states[$b]['last_check'] ?? ''));
             });
 
-            $this->run_checks($urls, time() + self::LOCK_TTL - 30);
+            // Margen para que el último lote, en el peor caso, termine antes de caducar el lock.
+            $outcome = $this->run_checks($urls, $started + self::LOCK_TTL - self::BATCH_WORST - 10);
+
+            $this->record_health($started, count($urls), $outcome);
+            $this->send_heartbeat();
         } finally {
-            delete_transient(self::LOCK_KEY);
+            $this->release_lock();
         }
 
         return true;
     }
 
-    /**
-     * Comprueba las URLs por lotes en paralelo. Tras cada lote relee lista y
-     * estados para no resucitar webs borradas mientras corría el ciclo.
-     */
-    private function run_checks(array $urls, $deadline = 0) {
-        if (!$urls) {
-            return;
+    /* ------------------------------------------------------------------
+     * Lock atómico (mismo patrón que WP_Upgrader::create_lock)
+     * ------------------------------------------------------------------ */
+
+    private function acquire_lock() {
+        global $wpdb;
+
+        $now = time();
+
+        // INSERT IGNORE sobre option_name único: solo un proceso puede crear la fila.
+        $insert = function () use ($wpdb, $now) {
+            return (bool) $wpdb->query($wpdb->prepare(
+                "INSERT IGNORE INTO `{$wpdb->options}` (`option_name`, `option_value`, `autoload`) VALUES (%s, %s, 'no')",
+                self::LOCK_OPT,
+                (string) $now
+            ));
+        };
+
+        if ($insert()) {
+            return true;
         }
 
-        $opts   = $this->get_options();
-        $max    = max(1, (int) $opts['max_failures']);
+        $held = (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT option_value FROM `{$wpdb->options}` WHERE option_name = %s",
+            self::LOCK_OPT
+        ));
+
+        if ($held === 0) {
+            return $insert(); // la fila desapareció entre medias: estaba libre
+        }
+
+        if (($now - $held) < self::LOCK_TTL) {
+            return false;
+        }
+
+        // Lock caducado (un ciclo anterior murió): relevo con compare-and-swap,
+        // solo uno de los procesos que compiten consigue modificar la fila.
+        return (bool) $wpdb->query($wpdb->prepare(
+            "UPDATE `{$wpdb->options}` SET option_value = %s WHERE option_name = %s AND option_value = %s",
+            (string) $now,
+            self::LOCK_OPT,
+            (string) $held
+        ));
+    }
+
+    private function release_lock() {
+        global $wpdb;
+
+        $wpdb->delete($wpdb->options, ['option_name' => self::LOCK_OPT]);
+    }
+
+    /* ------------------------------------------------------------------
+     * Comprobación por ciclos
+     * ------------------------------------------------------------------ */
+
+    /**
+     * Comprueba las URLs por lotes en paralelo y, con todos los resultados en la mano,
+     * decide si el ciclo es fiable antes de tocar el estado o enviar nada.
+     *
+     * @return array{checked:int,failed:int,discarded:bool}
+     */
+    private function run_checks(array $urls, $deadline = 0) {
+        $outcome = ['checked' => 0, 'failed' => 0, 'discarded' => false];
+
+        if (!$urls) {
+            return $outcome;
+        }
+
+        $opts    = $this->get_options();
+        $max     = max(1, (int) $opts['max_failures']);
         $verify  = !empty($opts['verify_ssl']);
         $ignored = $this->parse_ignored_codes($opts['ignored_codes']);
+        $prior   = $this->get_states();
+        $evals   = [];
 
         foreach (array_chunk($urls, self::BATCH_SIZE) as $chunk) {
             if ($deadline && time() > $deadline) {
                 break; // el resto se comprueba en el siguiente ciclo
             }
-
-            $prior = $this->get_states();
 
             // Reintento inmediato solo en el primer fallo: filtra microcortes
             // sin alargar el ciclo para webs que ya están en ventana de confirmación.
@@ -482,31 +569,53 @@ class Site_Uptime_Watcher {
                 return empty($prior[$url]['consecutive_failures']);
             }));
 
-            $results = $this->probe($chunk, $retryable, $verify, $ignored);
-
-            $current = $this->get_sites_list();
-            $states  = $this->get_states();
-
-            foreach ($results as $url => $eval) {
-                if (!in_array($url, $current, true)) {
-                    continue;
-                }
-                $states[$url] = $this->apply_result(
-                    $url,
-                    $states[$url] ?? $this->new_state(),
-                    $eval,
-                    $max,
-                    $opts['notify_email']
-                );
-            }
-
-            $this->save_states($states);
+            $evals += $this->probe($chunk, $retryable, $verify, $ignored);
         }
+
+        $outcome['checked'] = count($evals);
+        if (!$evals) {
+            return $outcome;
+        }
+
+        $down = count(array_filter($evals, function ($eval) {
+            return $eval['is_down'];
+        }));
+        $outcome['failed'] = $down;
+
+        // Si media lista cae a la vez y el propio servidor no sale a internet,
+        // el fallo es nuestro: se descarta el ciclo sin tocar estados ni enviar alertas.
+        if ($this->looks_like_own_outage(count($evals), $down)) {
+            $outcome['discarded'] = true;
+            return $outcome;
+        }
+
+        // Estado y lista se releen justo ahora: una web borrada mientras corría el ciclo no resucita.
+        $current = $this->get_sites_list();
+        $states  = $this->get_states();
+        $outbox  = ['down' => [], 'up' => []];
+
+        foreach ($evals as $url => $eval) {
+            if (!in_array($url, $current, true)) {
+                continue;
+            }
+            $states[$url] = $this->apply_result($url, $states[$url] ?? $this->new_state(), $eval, $max, $outbox);
+        }
+
+        // La alerta solo se da por enviada si el correo salió; si no, se reintenta en el siguiente ciclo.
+        foreach ($this->flush_outbox($outbox, $opts['notify_email'], $max) as $url) {
+            if (isset($states[$url])) {
+                $states[$url]['alert_sent'] = true;
+            }
+        }
+
+        $this->save_states($states);
+
+        return $outcome;
     }
 
-    private function apply_result($url, array $state, array $eval, $max, $recipient) {
-        $state['last_code']  = $eval['code'];
-        $state['last_check'] = current_time('mysql');
+    private function apply_result($url, array $state, array $eval, $max, array &$outbox) {
+        $state['last_code']   = $eval['code'];
+        $state['last_check']  = current_time('mysql');
         $state['last_detail'] = isset($eval['detail']) ? $eval['detail'] : '';
 
         if (!empty($eval['php'])) {
@@ -524,9 +633,15 @@ class Site_Uptime_Watcher {
                     $this->log_incident($url, 'down', $eval['code']);
                 }
                 $state['status'] = 'DOWN';
+
                 if (empty($state['alert_sent'])) {
-                    // Si el correo falla, no se marca como enviado y se reintenta en el siguiente ciclo.
-                    $state['alert_sent'] = $this->send_down_email($url, $eval['code'], $recipient, (int) $state['consecutive_failures'], (int) $max, (int) $state['first_failure_ts'], isset($eval['detail']) ? $eval['detail'] : '');
+                    $outbox['down'][] = [
+                        'url'      => $url,
+                        'code'     => $eval['code'],
+                        'detail'   => isset($eval['detail']) ? $eval['detail'] : '',
+                        'failures' => (int) $state['consecutive_failures'],
+                        'first_ts' => (int) $state['first_failure_ts'],
+                    ];
                 }
             } elseif (($state['status'] ?? '') !== 'DOWN') {
                 $state['status'] = 'PENDING';
@@ -540,15 +655,119 @@ class Site_Uptime_Watcher {
         }
 
         if (!empty($state['alert_sent'])) {
-            $this->send_recovery_email($url, $recipient, (int) ($state['first_failure_ts'] ?? 0), $eval['code']);
+            $outbox['up'][] = [
+                'url'      => $url,
+                'code'     => $eval['code'],
+                'first_ts' => (int) ($state['first_failure_ts'] ?? 0),
+            ];
         }
 
         $state['status']               = 'UP';
         $state['consecutive_failures'] = 0;
         $state['alert_sent']           = false;
-        $state['first_failure_ts']      = 0;
+        $state['first_failure_ts']     = 0;
 
         return $state;
+    }
+
+    /* ------------------------------------------------------------------
+     * Caída masiva: ¿falla el monitor o fallan las webs?
+     * ------------------------------------------------------------------ */
+
+    private function looks_like_own_outage($total, $down) {
+        if ($total < self::MASS_MIN || $down < self::MASS_MIN || $down < $total * self::MASS_RATIO) {
+            return false;
+        }
+
+        return !$this->has_internet();
+    }
+
+    /** Conectividad básica del servidor: basta con que responda uno de los destinos de control. */
+    private function has_internet() {
+        $targets = apply_filters('suw_canary_urls', [
+            'https://www.google.com/generate_204',
+            'https://www.cloudflare.com/cdn-cgi/trace',
+            'https://www.wikipedia.org/',
+        ]);
+
+        // Sin verificar certificado: aquí solo importa si hay salida a internet.
+        foreach ($this->fetch_many((array) $targets, false) as $r) {
+            if ($r['error'] === null && $r['code'] > 0 && $r['code'] < 500) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Envía los avisos del ciclo: uno por web, o un único resumen si son muchos.
+     *
+     * @return string[] URLs cuyo aviso de caída salió correctamente.
+     */
+    private function flush_outbox(array $outbox, $recipient, $max) {
+        $sent = [];
+
+        if (count($outbox['down']) >= self::DIGEST_MIN) {
+            if ($this->send_digest_email('down', $outbox['down'], $recipient)) {
+                $sent = array_column($outbox['down'], 'url');
+            }
+        } else {
+            foreach ($outbox['down'] as $item) {
+                if ($this->send_down_email($item['url'], $item['code'], $recipient, $item['failures'], $max, $item['first_ts'], $item['detail'])) {
+                    $sent[] = $item['url'];
+                }
+            }
+        }
+
+        if (count($outbox['up']) >= self::DIGEST_MIN) {
+            $this->send_digest_email('up', $outbox['up'], $recipient);
+        } else {
+            foreach ($outbox['up'] as $item) {
+                $this->send_recovery_email($item['url'], $recipient, $item['first_ts'], $item['code']);
+            }
+        }
+
+        return $sent;
+    }
+
+    /* ------------------------------------------------------------------
+     * Salud del propio monitor
+     * ------------------------------------------------------------------ */
+
+    private function record_health($started, $total, array $outcome) {
+        $prev = get_option(self::HEALTH_OPT, []);
+        $prev = is_array($prev) ? $prev : [];
+
+        $health = [
+            'last_cycle' => time(),
+            'duration'   => time() - $started,
+            'checked'    => $outcome['checked'],
+            'total'      => $total,
+            'guard'      => isset($prev['guard']) ? $prev['guard'] : null,
+        ];
+
+        if (!empty($outcome['discarded'])) {
+            $health['guard'] = ['time' => time(), 'failed' => $outcome['failed'], 'total' => $outcome['checked']];
+        }
+
+        update_option(self::HEALTH_OPT, $health, false);
+    }
+
+    /** Latido a un servicio externo (healthchecks.io, UptimeRobot...) que avisa si deja de llegar. */
+    private function send_heartbeat() {
+        $opts = $this->get_options();
+        $url  = (string) $opts['heartbeat_url'];
+
+        if ($url === '') {
+            return;
+        }
+
+        wp_safe_remote_get($url, [
+            'timeout'    => 5,
+            'redirection' => 2,
+            'user-agent' => 'SiteUptimeWatcher/' . SUW_VERSION,
+        ]);
     }
 
     private function probe(array $urls, array $retryable, $verify, array $ignored = []) {
@@ -867,6 +1086,44 @@ class Site_Uptime_Watcher {
     }
 
     /**
+     * Un único correo para varios avisos del mismo ciclo (evita 40 correos si cae un hosting entero).
+     */
+    private function send_digest_email($kind, array $items, $recipient) {
+        $is_down = ($kind === 'down');
+        $count   = count($items);
+        $rows    = [];
+
+        foreach (array_slice($items, 0, 40) as $item) {
+            $label = $this->host_of($item['url']);
+            if (isset($rows[$label])) {
+                $label = $item['url']; // misma web con y sin www
+            }
+            $rows[$label] = $item['code'];
+        }
+        if ($count > 40) {
+            $rows['…'] = sprintf('y %d más', $count - 40);
+        }
+
+        $mail = $this->render_email([
+            'kind'      => $kind,
+            'badge'     => $is_down ? 'VARIAS CAÍDAS' : 'RECUPERADAS',
+            'host'      => sprintf($is_down ? '%d webs caídas' : '%d webs recuperadas', $count),
+            'url'       => '',
+            'intro'     => $is_down
+                ? 'Varias webs han fallado a la vez y todas superaron la reconfirmación. Si comparten hosting o proveedor, la causa suele ser común.'
+                : 'Estas webs vuelven a responder con normalidad.',
+            'rows'      => $rows,
+            'preheader' => sprintf($is_down ? '%d webs no responden' : '%d webs vuelven a estar operativas', $count),
+        ]);
+
+        $subject = $is_down
+            ? sprintf('🔴 [ALERTA] %d webs caídas', $count)
+            : sprintf('🟢 [RECUPERADAS] %d webs online', $count);
+
+        return $this->send_html_mail($recipient, $subject, $mail['html'], $mail['text']);
+    }
+
+    /**
      * Plantilla basada en tablas y estilos en línea para que se vea igual en Gmail,
      * Outlook y clientes móviles. Devuelve ['html' => ..., 'text' => ...].
      */
@@ -880,7 +1137,7 @@ class Site_Uptime_Watcher {
         $font    = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
 
         $rows_html = '';
-        $text      = strip_tags($a['badge']) . ' - ' . $a['host'] . "\n" . $a['url'] . "\n\n" . $a['intro'] . "\n\n";
+        $text      = strip_tags($a['badge']) . ' - ' . $a['host'] . "\n" . ($a['url'] !== '' ? $a['url'] . "\n" : '') . "\n" . $a['intro'] . "\n\n";
 
         foreach ($a['rows'] as $label => $value) {
             $rows_html .= '<tr>'
@@ -909,7 +1166,7 @@ class Site_Uptime_Watcher {
             . '<tr><td style="background:' . $soft . ';border-top-left-radius:20px;border-top-right-radius:20px;border-bottom:4px solid ' . $accent . ';padding:28px 28px 24px 28px;">'
             . '<span style="display:inline-block;background:' . $accent . ';color:#ffffff;font-size:11px;font-weight:700;letter-spacing:.06em;padding:6px 12px;border-radius:999px;">' . esc_html($a['badge']) . '</span>'
             . '<div style="font-size:28px;line-height:1.2;font-weight:700;color:#1f1f1f;margin-top:16px;word-break:break-word;">' . esc_html($a['host']) . '</div>'
-            . '<div style="margin-top:6px;font-size:13px;word-break:break-all;"><a href="' . esc_url($a['url']) . '" style="color:' . $ink . ';text-decoration:none;">' . esc_html($a['url']) . '</a></div>'
+            . ($a['url'] !== '' ? '<div style="margin-top:6px;font-size:13px;word-break:break-all;"><a href="' . esc_url($a['url']) . '" style="color:' . $ink . ';text-decoration:none;">' . esc_html($a['url']) . '</a></div>' : '')
             . '</td></tr>'
 
             . '<tr><td style="padding:24px 28px 8px 28px;font-size:15px;line-height:1.55;color:#3c4043;">' . esc_html($a['intro']) . '</td></tr>'
@@ -919,8 +1176,7 @@ class Site_Uptime_Watcher {
             . '</td></tr>'
 
             . '<tr><td style="padding:22px 28px 30px 28px;">'
-            . '<a href="' . esc_url($a['url']) . '" style="' . $btn . 'background:#1a73e8;color:#ffffff;">Abrir la web</a>'
-            . '&nbsp;&nbsp;'
+            . ($a['url'] !== '' ? '<a href="' . esc_url($a['url']) . '" style="' . $btn . 'background:#1a73e8;color:#ffffff;">Abrir la web</a>&nbsp;&nbsp;' : '')
             . '<a href="' . esc_url($panel) . '" style="' . $btn . 'background:#f1f3f4;color:#1f1f1f;">Ver panel</a>'
             . '</td></tr>'
 
@@ -1007,6 +1263,11 @@ class Site_Uptime_Watcher {
         }
 
         $next_run = wp_next_scheduled(self::HOOK);
+        $health   = get_option(self::HEALTH_OPT, []);
+        $health   = is_array($health) ? $health : [];
+        $last_run = isset($health['last_cycle']) ? (int) $health['last_cycle'] : 0;
+        $is_stale = $last_run > 0 && (time() - $last_run) > self::STALE_AFTER;
+        $guard    = (!empty($health['guard']) && (time() - (int) $health['guard']['time']) < DAY_IN_SECONDS) ? $health['guard'] : null;
         ?>
         <div class="suw-container">
 
@@ -1265,6 +1526,12 @@ class Site_Uptime_Watcher {
                                 <small>Opcional. Útil si una web está tras un WAF que bloquea bots: respondería 403 estando operativa.</small>
                             </div>
 
+                            <div class="suw-field">
+                                <label for="suw_heartbeat">URL de heartbeat</label>
+                                <input type="url" id="suw_heartbeat" name="heartbeat_url" value="<?php echo esc_attr($opts['heartbeat_url']); ?>" class="suw-control" placeholder="https://hc-ping.com/…">
+                                <small>Opcional. Se llama tras cada ciclo. En un servicio externo (healthchecks.io, UptimeRobot) te avisa si el monitor deja de comprobar.</small>
+                            </div>
+
                             <button type="submit" class="suw-btn suw-btn-primary suw-btn-full">
                                 Guardar preferencias
                             </button>
@@ -1275,6 +1542,19 @@ class Site_Uptime_Watcher {
                         </a>
 
                         <p class="suw-cron-status">
+                            <?php if ($last_run): ?>
+                                Última comprobación:
+                                <strong class="<?php echo $is_stale ? 'suw-cron-warn' : ''; ?>">hace <?php echo esc_html(human_time_diff($last_run, time())); ?></strong><br>
+                            <?php endif; ?>
+
+                            <?php if ($is_stale): ?>
+                                <span class="suw-cron-warn">El monitor lleva demasiado sin comprobar. Revisa WP-Cron o usa un cron real del servidor.</span><br>
+                            <?php endif; ?>
+
+                            <?php if ($guard): ?>
+                                <span class="suw-cron-warn">Hace <?php echo esc_html(human_time_diff((int) $guard['time'], time())); ?> se descartó un ciclo: fallaron <?php echo (int) $guard['failed']; ?> de <?php echo (int) $guard['total']; ?> webs y este servidor no tenía salida a internet. No se enviaron alertas.</span><br>
+                            <?php endif; ?>
+
                             <?php if ($next_run): ?>
                                 Próxima comprobación: <strong><?php echo esc_html(wp_date('H:i:s', $next_run)); ?></strong>
                             <?php else: ?>
