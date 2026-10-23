@@ -19,6 +19,8 @@ Monitor de disponibilidad de URLs externas para WordPress.
 - Avisos por correo en HTML con diseño limpio y duración de la caída.
 - Añadir webs una a una o importación masiva por lote (copiar y pegar).
 - Eliminación individual y por lotes.
+- **Pausa por web** (mantenimientos, webs en construcción): no se comprueba ni avisa hasta reanudarla.
+- **Recordatorio cada 24 h** mientras una caída siga abierta (agrupado en un solo correo si son varias).
 - Diseño minimalista en lista horizontal con tipografía Outfit incluida en local (sin llamadas a Google).
 
 ## Instalación
@@ -60,17 +62,36 @@ Un monitor instalado en un sitio no puede avisar de su propia caída. Instálalo
 site-uptime-watcher/
 ├── site-uptime-watcher.php
 ├── uninstall.php
-├── includes/class-site-uptime-watcher.php
-├── includes/class-suw-updater.php
-├── includes/class-suw-php-info.php
-├── .github/workflows/release.yml
+├── includes/
+│   ├── class-site-uptime-watcher.php   (cron, ciclo de comprobación, avisos y manejadores del panel)
+│   ├── class-suw-store.php             (opciones, lista, estados, incidentes y lock)
+│   ├── class-suw-checker.php           (peticiones HTTP y diagnóstico de la respuesta)
+│   ├── class-suw-mailer.php            (correos HTML)
+│   ├── class-suw-updater.php           (actualizador por Releases)
+│   └── class-suw-php-info.php          (versión de PHP y riesgo)
+├── templates/admin-page.php            (vista del panel)
+├── tests/                              (php tests/run.php, sin dependencias)
+├── .github/workflows/{ci,release}.yml
 └── assets/
     ├── css/admin.css
     ├── js/admin.js
     └── fonts/   (Outfit, licencia SIL OFL 1.1)
 ```
 
+## Tests
+```
+php tests/run.php
+```
+Sin dependencias: simulan las funciones de WordPress y cubren el ciclo de comprobación, la guardia de caída masiva, los correos, el lock, el actualizador, la pausa, los recordatorios y la validación de URLs. El workflow **CI** los ejecuta en PHP 7.4 a 8.5, y el de **Release** no publica si fallan.
+
 ## Changelog
+
+### 1.12.0
+- **Recordatorio cada 24 h** mientras una web siga caída (un único correo si son varias), sin ráfagas al actualizar desde versiones anteriores.
+- **Pausar / reanudar** cada web desde la lista; las pausadas no se comprueban ni envían avisos y tienen su propio filtro.
+- **URLs validadas al añadir** con `wp_http_validate_url()`: se rechazan localhost, IPs privadas, metadatos cloud y credenciales en la URL (los puertos personalizados se permiten).
+- La fecha de la última comprobación se guarda también como timestamp: el orden de comprobación ya no se altera con el cambio de hora.
+- **Código dividido en módulos** (almacén, comprobador, correos, plantilla del panel) y **tests + CI** (PHP 7.4–8.5). El ZIP de la Release no incluye `tests/`.
 
 ### 1.11.0
 - **Actualizador solo con Releases:** un commit en `main` ya no se instala en producción hasta que se publica una Release. Si GitHub falla puntualmente se usa la última Release conocida. Caché de 1 hora. Nueva GitHub Action que publica la Release al subir una etiqueta `vX.Y.Z`.

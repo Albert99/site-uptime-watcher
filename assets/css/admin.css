@@ -315,6 +315,7 @@
 .suw-pill-chip.is-up { background: #e6f4ea; color: #137333; }
 .suw-pill-chip.is-down { background: #fce8e6; color: #c5221f; }
 .suw-pill-chip.is-pending { background: #fef7e0; color: #b06000; }
+.suw-pill-chip.is-paused { background: #f1f3f4; color: #5f6368; }
 
 .suw-dot {
     width: 8px;
@@ -325,6 +326,7 @@
 .suw-dot.is-up { background: #34a853; }
 .suw-dot.is-down { background: #ea4335; }
 .suw-dot.is-pending { background: #f9ab00; }
+.suw-dot.is-paused { background: #9aa0a6; }
 
 /* Layout */
 .suw-layout {
@@ -425,6 +427,16 @@
     border-left: 4px solid #f9ab00;
 }
 
+.suw-row-card.is-paused {
+    border-left: 4px solid #bdc1c6;
+}
+
+.suw-row-card.is-paused .suw-row-site,
+.suw-row-card.is-paused .suw-row-code,
+.suw-row-card.is-paused .suw-row-meta {
+    opacity: 0.6;
+}
+
 .suw-row-favicon {
     width: 32px;
     height: 32px;
@@ -516,6 +528,11 @@
     color: #b06000;
 }
 
+.suw-badge.is-paused {
+    background: #f1f3f4;
+    color: #5f6368;
+}
+
 .suw-row-code {
     flex-shrink: 0;
     max-width: 190px;
@@ -571,6 +588,9 @@
 
 .suw-row-actions {
     flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 2px;
 }
 
 .suw-icon-btn {
@@ -594,6 +614,12 @@
 .suw-icon-btn:hover {
     background: #fce8e6;
     color: #c5221f;
+}
+
+/* Pausar / reanudar no es una acción destructiva */
+a.suw-icon-btn:hover {
+    background: #e8f0fe;
+    color: #1a73e8;
 }
 
 /* Sidebar */

@@ -52,11 +52,15 @@ jobs:
         if: steps.meta.outputs.publish == 'true'
         run: find . -name '*.php' -not -path './.git/*' -print0 | xargs -0 -n1 php -l
 
+      - name: Ejecutar tests
+        if: steps.meta.outputs.publish == 'true'
+        run: php tests/run.php
+
       - name: Empaquetar ZIP
         if: steps.meta.outputs.publish == 'true'
         run: |
           mkdir -p /tmp/pkg/site-uptime-watcher
-          rsync -a --exclude='.git' --exclude='.github' --exclude='.gitignore' ./ /tmp/pkg/site-uptime-watcher/
+          rsync -a --exclude='.git' --exclude='.github' --exclude='.gitignore' --exclude='tests' ./ /tmp/pkg/site-uptime-watcher/
           (cd /tmp/pkg && zip -qr "$GITHUB_WORKSPACE/site-uptime-watcher.zip" site-uptime-watcher)
 
       - name: Publicar Release
