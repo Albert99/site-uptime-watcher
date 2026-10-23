@@ -509,6 +509,10 @@ class Site_Uptime_Watcher {
         $state['last_check'] = current_time('mysql');
         $state['last_detail'] = isset($eval['detail']) ? $eval['detail'] : '';
 
+        if (!empty($eval['php'])) {
+            $state['php_version'] = $eval['php'];
+        }
+
         if ($eval['is_down']) {
             $state['consecutive_failures'] = (int) ($state['consecutive_failures'] ?? 0) + 1;
             if ($state['consecutive_failures'] === 1 || empty($state['first_failure_ts'])) {
@@ -678,9 +682,10 @@ class Site_Uptime_Watcher {
                 $r = $responses[$url] ?? null;
                 if (is_object($r) && isset($r->status_code)) {
                     $out[$url] = [
-                        'code'  => (int) $r->status_code,
-                        'body'  => substr((string) $r->body, 0, self::MAX_BODY),
-                        'error' => null,
+                        'code'    => (int) $r->status_code,
+                        'body'    => substr((string) $r->body, 0, self::MAX_BODY),
+                        'error'   => null,
+                        'headers' => $this->pick_headers(isset($r->headers) ? $r->headers : null),
                     ];
                 } else {
                     $out[$url] = [
@@ -708,9 +713,10 @@ class Site_Uptime_Watcher {
                 $out[$url] = ['code' => 0, 'body' => '', 'error' => $response->get_error_message()];
             } else {
                 $out[$url] = [
-                    'code'  => (int) wp_remote_retrieve_response_code($response),
-                    'body'  => (string) wp_remote_retrieve_body($response),
-                    'error' => null,
+                    'code'    => (int) wp_remote_retrieve_response_code($response),
+                    'body'    => (string) wp_remote_retrieve_body($response),
+                    'error'   => null,
+                    'headers' => $this->pick_headers(wp_remote_retrieve_headers($response)),
                 ];
             }
         }
@@ -718,7 +724,30 @@ class Site_Uptime_Watcher {
         return $out;
     }
 
+    /** Solo guardamos las dos cabeceras que pueden delatar la versión de PHP. */
+    private function pick_headers($headers) {
+        $out = ['x-powered-by' => '', 'server' => ''];
+
+        if (!is_array($headers) && !($headers instanceof ArrayAccess)) {
+            return $out;
+        }
+
+        foreach (array_keys($out) as $key) {
+            $value     = isset($headers[$key]) ? $headers[$key] : '';
+            $out[$key] = is_array($value) ? implode(', ', $value) : (string) $value;
+        }
+
+        return $out;
+    }
+
     private function inspect_site_response(array $r, array $ignored = []) {
+        $eval        = $this->inspect_core($r, $ignored);
+        $eval['php'] = Site_Uptime_Php_Info::detect(isset($r['headers']) ? $r['headers'] : []);
+
+        return $eval;
+    }
+
+    private function inspect_core(array $r, array $ignored = []) {
         if ($r['error'] !== null) {
             $detail = function_exists('mb_substr') ? mb_substr($r['error'], 0, 160) : substr($r['error'], 0, 160);
             return ['is_down' => true, 'code' => $this->friendly_error($r['error']), 'detail' => $detail];
@@ -1118,6 +1147,7 @@ class Site_Uptime_Watcher {
                                     $code     = !empty($data['last_code']) ? $data['last_code'] : '—';
                                     $initial  = function_exists('mb_substr') ? mb_strtoupper(mb_substr($host, 0, 1)) : strtoupper(substr($host, 0, 1));
                                     $code_cls = $status === 'up' ? 'is-good' : ($status === 'down' ? 'is-bad' : 'is-wait');
+                                    $php      = Site_Uptime_Php_Info::assess(isset($data['php_version']) ? $data['php_version'] : '');
                                 ?>
                                     <div class="suw-row-card is-<?php echo esc_attr($status); ?>" data-status="<?php echo esc_attr($status); ?>" data-host="<?php echo esc_attr(strtolower($host)); ?>" data-order="<?php echo (int) $row_index; ?>">
                                         <div class="suw-row-select">
@@ -1152,6 +1182,19 @@ class Site_Uptime_Watcher {
 
                                         <div class="suw-row-code">
                                             <span class="suw-code-tag <?php echo esc_attr($code_cls); ?>" title="<?php echo esc_attr(trim($code . ' ' . (isset($data['last_detail']) ? $data['last_detail'] : ''))); ?>"><?php echo esc_html($code); ?></span>
+                                        </div>
+
+                                        <div class="suw-row-php">
+                                            <?php if ($php['version'] !== ''): ?>
+                                                <span class="suw-php-version">PHP <?php echo esc_html($php['version']); ?></span>
+                                            <?php else: ?>
+                                                <span class="suw-php-version is-empty" title="<?php echo esc_attr($php['reason']); ?>">PHP —</span>
+                                            <?php endif; ?>
+                                            <span class="suw-php-rec">Recomendada <?php echo esc_html($php['recommended']); ?></span>
+                                        </div>
+
+                                        <div class="suw-row-risk">
+                                            <span class="suw-risk is-<?php echo esc_attr($php['risk']); ?>" title="<?php echo esc_attr($php['reason']); ?>"><?php echo esc_html($php['label']); ?></span>
                                         </div>
 
                                         <div class="suw-row-meta">

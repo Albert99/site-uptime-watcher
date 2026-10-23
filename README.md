@@ -60,6 +60,7 @@ site-uptime-watcher/
 ├── uninstall.php
 ├── includes/class-site-uptime-watcher.php
 ├── includes/class-suw-updater.php
+├── includes/class-suw-php-info.php
 └── assets/
     ├── css/admin.css
     ├── js/admin.js
@@ -67,6 +68,12 @@ site-uptime-watcher/
 ```
 
 ## Changelog
+
+### 1.10.0
+- Nuevas columnas por web: **PHP** (versión que publica el servidor), **Recomendada** (8.3+, la recomendación oficial de WordPress) y **Riesgo** (alto / medio / bajo).
+- Riesgo según el calendario de php.net: *alto* si la rama ya no recibe parches de seguridad, *medio* si solo recibe seguridad y le queda un año o menos, *bajo* si le queda más. Al pasar el ratón se explica el motivo.
+- La versión se lee de las cabeceras `X-Powered-By` / `Server`. Si el hosting las oculta se muestra "sin datos" (no se inventa).
+- Tabla de soporte ampliable con el filtro `suw_php_support_table`.
 
 ### 1.9.2
 - Quitado el texto "Comprobación en curso…" del panel lateral (era estático y no aportaba información).

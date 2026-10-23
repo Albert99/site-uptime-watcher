@@ -849,6 +849,60 @@
     flex-wrap: wrap;
 }
 
+/* Versión de PHP y riesgo */
+.suw-row-php {
+    flex-shrink: 0;
+    min-width: 112px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.suw-php-version {
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 12.5px;
+    font-weight: 700;
+    color: #1f1f1f;
+    white-space: nowrap;
+}
+
+.suw-php-version.is-empty {
+    color: #9aa0a6;
+    font-weight: 600;
+    cursor: help;
+}
+
+.suw-php-rec {
+    font-size: 11px;
+    color: #80868b;
+    white-space: nowrap;
+}
+
+.suw-row-risk {
+    flex-shrink: 0;
+    min-width: 96px;
+}
+
+.suw-risk {
+    display: inline-block;
+    padding: 5px 12px;
+    border-radius: 9999px;
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+    cursor: help;
+}
+
+.suw-risk.is-high { background: #fce8e6; color: #c5221f; }
+.suw-risk.is-medium { background: #fef7e0; color: #b06000; }
+.suw-risk.is-low { background: #e6f4ea; color: #137333; }
+.suw-risk.is-unknown { background: #f1f3f4; color: #5f6368; }
+
+@media (max-width: 1280px) {
+    .suw-row-card { flex-wrap: wrap; }
+    .suw-row-site { flex-basis: 200px; }
+}
+
 @media (prefers-reduced-motion: reduce) {
     .suw-row-card,
     .suw-modal-dialog,
