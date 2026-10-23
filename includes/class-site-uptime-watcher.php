@@ -986,6 +986,15 @@ class Site_Uptime_Watcher {
         $max    = max(1, (int) $opts['max_failures']);
         $post   = esc_url(admin_url('admin-post.php'));
 
+        // Las columnas de PHP solo aparecen si alguna web publica su versión.
+        $has_php = false;
+        foreach ($rows as $row) {
+            if (!empty($row['data']['php_version'])) {
+                $has_php = true;
+                break;
+            }
+        }
+
         $total_up = $total_down = $total_pending = 0;
         foreach ($rows as $row) {
             if ($row['status'] === 'up') {
@@ -1184,6 +1193,7 @@ class Site_Uptime_Watcher {
                                             <span class="suw-code-tag <?php echo esc_attr($code_cls); ?>" title="<?php echo esc_attr(trim($code . ' ' . (isset($data['last_detail']) ? $data['last_detail'] : ''))); ?>"><?php echo esc_html($code); ?></span>
                                         </div>
 
+                                        <?php if ($has_php): ?>
                                         <div class="suw-row-php">
                                             <?php if ($php['version'] !== ''): ?>
                                                 <span class="suw-php-version">PHP <?php echo esc_html($php['version']); ?></span>
@@ -1196,6 +1206,8 @@ class Site_Uptime_Watcher {
                                         <div class="suw-row-risk">
                                             <span class="suw-risk is-<?php echo esc_attr($php['risk']); ?>" title="<?php echo esc_attr($php['reason']); ?>"><?php echo esc_html($php['label']); ?></span>
                                         </div>
+
+                                        <?php endif; ?>
 
                                         <div class="suw-row-meta">
                                             <span class="suw-meta-failures">Fallos: <strong><?php echo (int) $failures; ?></strong></span>

@@ -69,6 +69,9 @@ site-uptime-watcher/
 
 ## Changelog
 
+### 1.10.1
+- Las columnas PHP / Recomendada / Riesgo solo se muestran si al menos una web publica su versión de PHP; si ninguna lo hace, el panel queda limpio y reaparecen solas cuando haya datos.
+
 ### 1.10.0
 - Nuevas columnas por web: **PHP** (versión que publica el servidor), **Recomendada** (8.3+, la recomendación oficial de WordPress) y **Riesgo** (alto / medio / bajo).
 - Riesgo según el calendario de php.net: *alto* si la rama ya no recibe parches de seguridad, *medio* si solo recibe seguridad y le queda un año o menos, *bajo* si le queda más. Al pasar el ratón se explica el motivo.
